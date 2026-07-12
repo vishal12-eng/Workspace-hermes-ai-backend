@@ -65,6 +65,18 @@ class TestDropThinkingOnlyAndMergeUsers:
         # Should return the original list untouched (identity) when no changes.
         assert out is msgs
 
+    def test_drops_thinking_only_between_user_messages_and_merges(self):
+        msgs = [
+            {"role": "user", "content": "help me with X"},
+            {"role": "assistant", "content": "", "reasoning": "let me think"},
+            {"role": "user", "content": "ok continue"},
+        ]
+        out = AIAgent._drop_thinking_only_and_merge_users(msgs)
+        assert len(out) == 1
+        assert out[0]["role"] == "user"
+        assert out[0]["content"] == (
+            "help me with X\n\n[Next user message]\n\nok continue"
+        )
 
     def test_preserves_alternation_after_drop(self):
         msgs = [
@@ -76,10 +88,20 @@ class TestDropThinkingOnlyAndMergeUsers:
         out = AIAgent._drop_thinking_only_and_merge_users(msgs)
         roles = [m["role"] for m in out]
         assert roles == ["user", "assistant"]
-        assert out[0]["content"] == "u1\n\nu2"
+        assert out[0]["content"] == "u1\n\n[Next user message]\n\nu2"
         assert out[1]["content"] == "real reply"
 
 
+    def test_multiple_thinking_only_in_sequence_collapses(self):
+        msgs = [
+            {"role": "user", "content": "u1"},
+            {"role": "assistant", "content": "", "reasoning": "r1"},
+            {"role": "assistant", "content": "", "reasoning": "r2"},
+            {"role": "user", "content": "u2"},
+        ]
+        out = AIAgent._drop_thinking_only_and_merge_users(msgs)
+        assert len(out) == 1
+        assert out[0]["content"] == "u1\n\n[Next user message]\n\nu2"
 
     def test_does_not_touch_stored_messages_original_list_unmutated(self):
         original_first_user = {"role": "user", "content": "u1"}
@@ -118,9 +140,23 @@ class TestDropThinkingOnlyAndMergeUsers:
         assert len(out) == 1
         assert out[0]["content"] == [
             {"type": "text", "text": "first"},
+            {"type": "text", "text": "[Next user message]"},
             {"type": "text", "text": "second"},
         ]
 
+    def test_merge_mixed_string_and_list_content(self):
+        msgs = [
+            {"role": "user", "content": "plain text"},
+            {"role": "assistant", "content": "", "reasoning": "..."},
+            {"role": "user", "content": [{"type": "text", "text": "block text"}]},
+        ]
+        out = AIAgent._drop_thinking_only_and_merge_users(msgs)
+        assert len(out) == 1
+        assert out[0]["content"] == [
+            {"type": "text", "text": "plain text"},
+            {"type": "text", "text": "[Next user message]"},
+            {"type": "text", "text": "block text"},
+        ]
 
     def test_system_messages_ignored_by_pass(self):
         msgs = [
@@ -133,4 +169,4 @@ class TestDropThinkingOnlyAndMergeUsers:
         assert len(out) == 2
         assert out[0]["role"] == "system"
         assert out[1]["role"] == "user"
-        assert out[1]["content"] == "u1\n\nu2"
+        assert out[1]["content"] == "u1\n\n[Next user message]\n\nu2"
