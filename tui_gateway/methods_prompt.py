@@ -108,6 +108,25 @@ def _(rid, params: dict) -> dict:
         from tools.tts_streaming import mark_speech_interrupted
 
         mark_speech_interrupted()
+    raw_submitted_at = params.get("submitted_at")
+    try:
+        submitted_at = (
+            float(raw_submitted_at)
+            if raw_submitted_at is not None
+            else time.time()
+        )
+    except (TypeError, ValueError):
+        submitted_at = time.time()
+    raw_message_id = params.get("message_id")
+    explicit_message_id = (
+        str(raw_message_id).strip() if raw_message_id is not None else None
+    ) or None
+    message_id = (
+        explicit_message_id
+        if explicit_message_id is not None
+        else str(rid) if rid is not None else None
+    )
+
     session, err = _sess_nowait(params, rid)
     if err:
         return err
@@ -131,6 +150,10 @@ def _(rid, params: dict) -> dict:
     while True:
         busy_transport = None
         with session["history_lock"]:
+            if explicit_message_id is not None and _has_prompt_message_id(
+                session, explicit_message_id
+            ):
+                return _ok(rid, {"status": "duplicate"})
             if session.get("running"):
                 # Don't reject a mid-turn prompt — queue it (and, by default,
                 # interrupt the live turn) so it runs as the next turn. The
@@ -140,8 +163,14 @@ def _(rid, params: dict) -> dict:
             else:
                 break
         busy_response = _handle_busy_submit(
-            rid, sid, session, text, busy_transport,
+            rid,
+            sid,
+            session,
+            text,
+            busy_transport,
             queued=bool(params.get("queued")),
+            submitted_at=submitted_at,
+            message_id=message_id,
         )
         if busy_response is not None:
             return busy_response
@@ -150,6 +179,14 @@ def _(rid, params: dict) -> dict:
         # queue whose drain already ran.
 
     with session["history_lock"]:
+        # A Desktop queue entry keeps the same explicit ID across
+        # timeout/resume retries. Acknowledge an already-owned ID instead of
+        # accepting a duplicate turn. Do not dedupe the JSON-RPC request ID
+        # fallback: clients may reuse it after reconnect.
+        if explicit_message_id is not None and _has_prompt_message_id(
+            session, explicit_message_id
+        ):
+            return _ok(rid, {"status": "duplicate"})
         # A watch session's run lives in the PARENT turn, so its own running
         # flag is False — without this, typing mid-run builds a second agent
         # racing the in-flight child on the same stored session (interleaved
@@ -220,10 +257,17 @@ def _(rid, params: dict) -> dict:
         session["running"] = True
         session["_turn_cancel_requested"] = False
         session["last_active"] = time.time()
-        _start_inflight_turn(session, text)
+        _start_inflight_turn(session, text, message_id=message_id)
 
     if turn_isolation:
-        isolated_response = _submit_prompt_to_compute_host(rid, sid, session, text)
+        isolated_response = _submit_prompt_to_compute_host(
+            rid,
+            sid,
+            session,
+            text,
+            submitted_at=submitted_at,
+            message_id=message_id,
+        )
         if not isolated_response.get("error"):
             return isolated_response
         logger.warning(
@@ -280,7 +324,14 @@ def _(rid, params: dict) -> dict:
                     },
                 )
                 return
-        _run_prompt_submit(rid, sid, session, text)
+        _run_prompt_submit(
+            rid,
+            sid,
+            session,
+            text,
+            submitted_at=submitted_at,
+            message_id=message_id,
+        )
 
     run_thread = threading.Thread(target=run_after_agent_ready, daemon=True)
     # Keep a handle so session.interrupt can tell a live turn from a stuck

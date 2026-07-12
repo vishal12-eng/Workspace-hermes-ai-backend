@@ -1093,6 +1093,7 @@ def run_conversation(
     persist_user_display_kind: Optional[str] = None,
     persist_user_display_metadata: Optional[Dict[str, Any]] = None,
     moa_config: Optional[dict[str, Any]] = None,
+    persist_user_message_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run a complete conversation with tool calling until completion.
@@ -1108,8 +1109,8 @@ def run_conversation(
         persist_user_message: Optional clean user message to store in
             transcripts/history when user_message contains API-only
             synthetic prefixes.
-        persist_user_timestamp: Optional platform event timestamp to store
-            as metadata on that persisted user message.
+        persist_user_timestamp: Optional source submission timestamp to store
+            on the canonical user message and persisted row.
         persist_user_display_kind: Optional presentation type for a
             synthesized user turn (``auto_continue``, ``model_switch``, …).
             Display-only: transcript surfaces render the row as a timeline
@@ -1117,7 +1118,9 @@ def run_conversation(
             the message unchanged.
         persist_user_display_metadata: Optional payload for that event
             (e.g. a delegation's task count).
-                or queuing follow-up prefetch work.
+        moa_config: Optional mixture-of-agents configuration for this turn.
+        persist_user_message_id: Optional stable source identity to retain on
+            the canonical user message and persisted row.
 
     Returns:
         Dict: Complete conversation result with final response and message history
@@ -1159,6 +1162,7 @@ def run_conversation(
         stream_callback,
         persist_user_message,
         persist_user_timestamp,
+        persist_user_message_id,
         persist_user_display_kind=persist_user_display_kind,
         persist_user_display_metadata=persist_user_display_metadata,
         restore_or_build_system_prompt=_restore_or_build_system_prompt,
@@ -1408,16 +1412,15 @@ def run_conversation(
                 agent.session_id or "-",
             )
 
-        # Defensive: repair malformed role-alternation before API call.
-        # Catches cases where the history got wedged into a
-        # ``tool → user`` or ``user → user`` tail (e.g. after empty-
-        # response scaffolding was stripped and a new user message
-        # landed after an orphan tool result). Most providers return
-        # empty content on malformed sequences, which would otherwise
-        # retrigger the empty-retry loop indefinitely.
-        # repair_message_sequence_with_cursor also recomputes the SessionDB
-        # flush cursor (_last_flushed_db_idx) when repair compacts the list,
-        # so the turn-end flush doesn't skip the assistant/tool chain (#44837).
+        # Defensive: repair malformed assistant/tool structure in canonical
+        # history before the API call. This collapses split assistant turns and
+        # drops orphaned tool results without collapsing adjacent user source
+        # messages. Strict-provider user-role alternation is repaired later by
+        # ``_drop_thinking_only_and_merge_users`` on the per-request copy.
+        # ``repair_message_sequence_with_cursor`` also recomputes the SessionDB
+        # flush cursor (_last_flushed_db_idx) when canonical repair compacts the
+        # list, so turn-end flushing cannot skip shifted assistant/tool rows
+        # (#44837).
         from agent.agent_runtime_helpers import repair_message_sequence_with_cursor
         repaired_seq = repair_message_sequence_with_cursor(agent, messages)
         if repaired_seq > 0:
@@ -1445,11 +1448,17 @@ def run_conversation(
             api_msg.pop("display_kind", None)
             api_msg.pop("display_metadata", None)
 
-            # Durable row identity stamped by _rows_to_conversation so the
-            # desktop can address a specific persisted message (reactions).
-            # Bookkeeping, never a provider field — only the chat-completions
-            # transport strips underscore keys, so drop it centrally here.
-            api_msg.pop("_row_id", None)
+            # Canonical source identity and durable row identity are bookkeeping,
+            # never provider fields. Strip them at the common API-copy boundary
+            # so every transport receives the same clean request shape.
+            for metadata_key in (
+                "timestamp",
+                "message_id",
+                "platform_message_id",
+                "_source_message_id",
+                "_row_id",
+            ):
+                api_msg.pop(metadata_key, None)
 
             # Inject ephemeral context into the current turn's user message.
             # Sources: memory manager prefetch + plugin pre_llm_call hooks
