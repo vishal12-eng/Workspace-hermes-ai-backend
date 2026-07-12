@@ -8364,6 +8364,7 @@ def _read_spawn_tree_index(session_dir) -> list[dict]:
 
 
 
+
 def _notification_event_belongs_elsewhere(sid: str, session: dict, evt: dict) -> bool:
     """True if ``evt`` is owned by a *different* live session.
 
