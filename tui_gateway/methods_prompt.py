@@ -256,7 +256,12 @@ def _(rid, params: dict) -> dict:
         session["running"] = True
         session["_turn_cancel_requested"] = False
         session["last_active"] = time.time()
-        _start_inflight_turn(session, text, message_id=message_id)
+        _start_inflight_turn(
+            session,
+            text,
+            submitted_at=submitted_at,
+            message_id=message_id,
+        )
 
     if turn_isolation:
         isolated_response = _submit_prompt_to_compute_host(

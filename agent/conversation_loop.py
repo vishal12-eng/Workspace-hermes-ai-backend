@@ -1421,7 +1421,10 @@ def run_conversation(
         # flush cursor (_last_flushed_db_idx) when canonical repair compacts the
         # list, so turn-end flushing cannot skip shifted assistant/tool rows
         # (#44837).
-        from agent.agent_runtime_helpers import repair_message_sequence_with_cursor
+        from agent.agent_runtime_helpers import (
+            copy_message_for_api,
+            repair_message_sequence_with_cursor,
+        )
         repaired_seq = repair_message_sequence_with_cursor(agent, messages)
         if repaired_seq > 0:
             request_logger.info(
@@ -1432,7 +1435,11 @@ def run_conversation(
 
         api_messages = []
         for idx, msg in enumerate(messages):
-            api_msg = msg.copy()
+            # Source ordering/deduplication metadata belongs to the canonical
+            # transcript and SessionDB, never to a provider request. Strip it
+            # through the shared copy boundary so every direct API path uses
+            # the same metadata policy without mutating canonical history.
+            api_msg = copy_message_for_api(msg)
 
             # api_content is the persistence sidecar carrying the exact bytes
             # sent to the API for this message when they differ from the clean
@@ -1448,18 +1455,10 @@ def run_conversation(
             api_msg.pop("display_kind", None)
             api_msg.pop("display_metadata", None)
 
-            # Canonical source identity and durable row identity are bookkeeping,
-            # never provider fields. Strip them at the common API-copy boundary
-            # so every transport receives the same clean request shape.
-            for metadata_key in (
-                "timestamp",
-                "message_id",
-                "platform_message_id",
-                "_source_message_id",
-                "_row_id",
-            ):
-                api_msg.pop(metadata_key, None)
-
+            # Durable row identity is canonical bookkeeping, never a provider
+            # field. ``copy_message_for_api`` already strips the source-id
+            # metadata tuple; strip the remaining _row_id here too.
+            api_msg.pop("_row_id", None)
             # Inject ephemeral context into the current turn's user message.
             # Sources: memory manager prefetch + plugin pre_llm_call hooks
             # with target="user_message" (the default).  Both are

@@ -6779,6 +6779,7 @@ def _start_inflight_turn(
     session: dict,
     text: Any,
     *,
+    submitted_at: float | None = None,
     message_id: str | None = None,
 ) -> None:
     now = time.time()
@@ -6789,6 +6790,8 @@ def _start_inflight_turn(
         "updated_at": now,
         "user": _inflight_text(text),
     }
+    if submitted_at is not None:
+        session["inflight_turn"]["submitted_at"] = submitted_at
     if message_id is not None:
         session["inflight_turn"]["message_id"] = message_id
 
@@ -7141,18 +7144,11 @@ def _handle_busy_submit(
     default policy now redirects a capable core agent in place; older agents
     retain the proven interrupt-and-queue path drained from ``run``'s tail.
 
-    Modes: ``interrupt`` (default) → redirect the live turn, falling back to
-    hard interrupt + queue for older agents; ``queue`` → queue without
-    interrupting; ``steer`` → inject after the current atomic action.
-
-    ``queued=True`` (client's queue drain, ``prompt.submit`` param) overrides
-    the mode entirely: the message was explicitly queued as "run after", so it
-    must NEVER become a live-turn correction or interrupt. Without this, a
-    drain that loses the settle race (client observed idle, server still
-    unwinding the turn) redirected the live turn with next-turn text — queue
-    semantics betrayed by a millisecond race the user can't see.
+    Modes: ``interrupt`` (default) interrupts the live turn before queueing;
+    ``queue`` and legacy ``steer`` queue without interruption. Live non-canonical
+    injection remains available only through the explicit ``session.steer`` API.
     """
-    mode = "queue" if queued else _load_busy_input_mode()
+    mode = _load_busy_input_mode()
     agent = session.get("agent")
     with session["history_lock"]:
         if not session.get("running"):
@@ -7230,6 +7226,12 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
         session["running"] = True
         if queued.get("transport") is not None:
             session["transport"] = queued["transport"]
+        _start_inflight_turn(
+            session,
+            queued["text"],
+            submitted_at=queued.get("submitted_at"),
+            message_id=queued.get("message_id"),
+        )
     run_kwargs = {
         key: queued[key]
         for key in ("submitted_at", "message_id")
@@ -7255,6 +7257,7 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
             file=sys.stderr,
         )
         with session["history_lock"]:
+            _clear_inflight_turn(session)
             next_queued = session.get("queued_prompt")
             if next_queued:
                 session.setdefault("queued_prompts", []).insert(0, next_queued)
@@ -8365,6 +8368,7 @@ def _read_spawn_tree_index(session_dir) -> list[dict]:
 
 
 
+
 def _notification_event_belongs_elsewhere(sid: str, session: dict, evt: dict) -> bool:
     """True if ``evt`` is owned by a *different* live session.
 
@@ -9057,7 +9061,12 @@ def _run_prompt_submit(
         # A retained failed turn (see _fail_inflight_turn) is a stale leftover
         # by the time a new turn starts — replace it, never append onto it.
         if not isinstance(inflight, dict) or inflight.get("status") == "error":
-            _start_inflight_turn(session, text, message_id=message_id)
+            _start_inflight_turn(
+                session,
+                text,
+                submitted_at=submitted_at,
+                message_id=message_id,
+            )
     agent = session["agent"]
     if hasattr(agent, "clear_interrupt"):
         try:
