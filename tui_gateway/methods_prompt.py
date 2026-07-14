@@ -141,14 +141,18 @@ def _(rid, params: dict) -> dict:
         )
     isolation_cfg = _load_dashboard_process_isolation_config()
     turn_isolation = _session_uses_compute_host(session, isolation_cfg)
-    # Re-bind to the current client transport for this request. This keeps
-    # streaming events on the active websocket even if an earlier disconnect
-    # or fallback moved the session transport to stdio.
-    if (t := current_transport()) is not None:
-        session["transport"] = t
+    # Bind the request and any matching queued source atomically. A reconnect
+    # retry must not leave its queue entry pinned to the disconnected websocket.
+    t = current_transport()
     while True:
         busy_transport = None
         with session["history_lock"]:
+            if t is not None:
+                _rebind_session_transport(
+                    session,
+                    t,
+                    message_id=explicit_message_id,
+                )
             if explicit_message_id is not None and _has_prompt_message_id(
                 session, explicit_message_id
             ):
@@ -177,7 +181,12 @@ def _(rid, params: dict) -> dict:
         # claim so this prompt starts normally instead of being stranded in a
         # queue whose drain already ran.
 
-    with session["history_lock"]:
+        if t is not None:
+            _rebind_session_transport(
+                session,
+                t,
+                message_id=explicit_message_id,
+            )
         # A Desktop queue entry keeps the same explicit ID across
         # timeout/resume retries. Acknowledge an already-owned ID instead of
         # interrupting again or enqueuing a duplicate turn. JSON-RPC request
