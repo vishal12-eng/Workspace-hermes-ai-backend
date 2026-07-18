@@ -155,24 +155,46 @@ class TestDelegateSeedsChildRecord:
 
 
 class TestCommandCwdReadsTheRecord:
-    """_resolve_command_cwd: workdir > session record > default. Nothing else."""
+    """Precedence: workdir > authoritative cwd > session record > default."""
 
-    def test_record_beats_default(self):
-        tt.record_session_cwd("sess-a", "/my/worktree")
+    def test_authoritative_cwd_beats_default(self):
+        from agent.runtime_cwd import set_authoritative_session_cwd, reset_authoritative_session_cwd
+        tokens = set_authoritative_session_cwd("/my/worktree")
+        try:
+            resolved = tt._resolve_command_cwd(
+                workdir=None,
+                default_cwd="/config/default",
+            )
+            assert resolved == "/my/worktree"
+        finally:
+            reset_authoritative_session_cwd(tokens)
+
+    def test_workdir_beats_authoritative_cwd(self):
+        from agent.runtime_cwd import set_authoritative_session_cwd, reset_authoritative_session_cwd
+        tokens = set_authoritative_session_cwd("/my/worktree")
+        try:
+            resolved = tt._resolve_command_cwd(
+                workdir="/explicit/place",
+                default_cwd="/config/default",
+            )
+            assert resolved == "/explicit/place"
+        finally:
+            reset_authoritative_session_cwd(tokens)
+
+    def test_no_authoritative_or_session_cwd_falls_back_to_default(self):
         resolved = tt._resolve_command_cwd(
             workdir=None,
             default_cwd="/config/default",
-            session_key="sess-a",
         )
-        assert resolved == "/my/worktree"
-
+        assert resolved == "/config/default"
 
     def test_other_sessions_record_is_not_consulted(self):
+        # Without an authoritative ContextVar set, a bare call falls back to
+        # default_cwd regardless of what record_session_cwd wrote.
         tt.record_session_cwd("sess-b", "/other/worktree")
         resolved = tt._resolve_command_cwd(
             workdir=None,
             default_cwd="/config/default",
-            session_key="sess-a",
         )
         assert resolved == "/config/default"
 
