@@ -498,10 +498,10 @@ export function CommandPalette() {
     const settingsTab = (tab: string) => `${SETTINGS_ROUTE}?tab=${tab}`
     const cc = t.commandCenter
 
-    // The active repo's worktrees → "new conversation in <branch>". This is the
-    // ⌘K-typed "I want to work on <branch>" reflex: each entry seeds a fresh
-    // session anchored to that worktree's checkout (requestStartWorkSession),
-    // so git is the source of truth and edits land in the right tree.
+    // The active repo's worktrees → "new conversation in <branch>": each entry
+    // seeds a fresh session anchored to that worktree's checkout
+    // (requestStartWorkSession), so git is the source of truth and edits land in
+    // the right tree. Ordered last in the returned list — see the note there.
     const branchGroup: PaletteGroup[] =
       worktrees.length > 0
         ? [
@@ -522,6 +522,33 @@ export function CommandPalette() {
           ]
         : []
 
+    // Registry-contributed rows (core features + plugins) — one group, omitted
+    // while nothing contributes.
+    const commandGroup: PaletteGroup[] =
+      contributedItems.length > 0
+        ? [
+            {
+              heading: cc.commands,
+              items: contributedItems.map(item => ({
+                action: item.action,
+                // Resolved per palette open (see the `open` dep below) so a
+                // state-describing row can't show a state it left.
+                detail: item.detail?.(),
+                icon: item.icon ?? Zap,
+                id: item.key,
+                keywords: item.keywords,
+                label: item.label,
+                run: item.run
+              }))
+            }
+          ]
+        : []
+
+    // Group order is the tiebreaker rankGroups falls back on (stable sort), and
+    // exact ties are the common case — "yolo" hits both "Toggle YOLO" and a
+    // worktree named bb/yolo-* as a whole word. So this order IS the priority:
+    // navigation and actions first, then the settings-shaped lists, and the
+    // branch rows last since they're contextual and scale with the checkout.
     return [
       {
         heading: cc.goTo,
@@ -602,7 +629,7 @@ export function CommandPalette() {
           }
         ]
       },
-      ...branchGroup,
+      ...commandGroup,
       {
         heading: cc.commandCenter,
         items: [
@@ -699,26 +726,7 @@ export function CommandPalette() {
           }))
         ]
       },
-      // Registry-contributed rows (core features + plugins) — one group,
-      // omitted while nothing contributes.
-      ...(contributedItems.length > 0
-        ? [
-            {
-              heading: cc.commands,
-              items: contributedItems.map(item => ({
-                action: item.action,
-                // Resolved per palette open (see the `open` dep below) so a
-                // state-describing row can't show a state it left.
-                detail: item.detail?.(),
-                icon: item.icon ?? Zap,
-                id: item.key,
-                keywords: item.keywords,
-                label: item.label,
-                run: item.run
-              }))
-            }
-          ]
-        : [])
+      ...branchGroup
     ]
   }, [contributedItems, go, open, settingsSectionLabel, t, updateVersionLabel, worktrees, yoloActive])
 
