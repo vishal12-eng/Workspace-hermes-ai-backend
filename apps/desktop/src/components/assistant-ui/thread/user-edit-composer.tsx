@@ -93,6 +93,7 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
   // mount-time snapshot can incorrectly classify every later blur as dirty.
   const initialDraftRef = useRef<string | null>(null)
   const draftRef = useRef(draft)
+  const composingRef = useRef(false)
   const dragDepthRef = useRef(0)
   const [dragActive, setDragActive] = useState(false)
   const [trigger, setTrigger] = useState<TriggerState | null>(null)
@@ -513,16 +514,27 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
     }
   }
 
-  const handleInput = (event: FormEvent<HTMLDivElement>) => {
-    const editor = event.currentTarget
+  const flushEditorToDraft = useCallback(
+    (editor: HTMLDivElement) => {
+      if (editor.childNodes.length === 1 && editor.firstChild?.nodeName === 'BR') {
+        editor.replaceChildren()
+      }
 
-    if (editor.childNodes.length === 1 && editor.firstChild?.nodeName === 'BR') {
-      editor.replaceChildren()
+      rememberInitialDraft()
+      const nextDraft = syncDraftFromEditor(editor)
+      window.setTimeout(refreshTrigger, 0)
+
+      return nextDraft
+    },
+    [refreshTrigger, rememberInitialDraft, syncDraftFromEditor]
+  )
+
+  const handleInput = (event: FormEvent<HTMLDivElement>) => {
+    if (composingRef.current) {
+      return
     }
 
-    rememberInitialDraft()
-    syncDraftFromEditor(editor)
-    window.setTimeout(refreshTrigger, 0)
+    flushEditorToDraft(event.currentTarget)
   }
 
   // Native typing/deleting still goes through Chromium's editing pipeline, whose
@@ -557,6 +569,10 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
   }
 
   const submitEdit = (editor: HTMLDivElement) => {
+    if (composingRef.current) {
+      return
+    }
+
     const nextDraft = syncDraftFromEditor(editor)
 
     if (submitting || staging || !nextDraft.trim()) {
@@ -624,6 +640,10 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
   )
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (composingRef.current || event.nativeEvent.isComposing) {
+      return
+    }
+
     if (trigger && triggerItems.length > 0) {
       if (event.key === 'ArrowDown') {
         event.preventDefault()
@@ -772,6 +792,13 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
               data-slot={RICH_INPUT_SLOT}
               onBeforeInput={handleBeforeInput}
               onBlur={() => window.setTimeout(closeTrigger, 80)}
+              onCompositionEnd={event => {
+                composingRef.current = false
+                flushEditorToDraft(event.currentTarget)
+              }}
+              onCompositionStart={() => {
+                composingRef.current = true
+              }}
               onDragOver={handleDragOver}
               onDrop={handleDrop}
               onFocus={() => markActiveComposer('edit')}
