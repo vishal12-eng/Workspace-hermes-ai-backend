@@ -951,11 +951,14 @@ def _close_sessions_for_transport(
             _close_session_by_id(sid, end_reason=end_reason)
             reaped += 1
         else:
-            # Point detached sessions at the drop sentinel (NOT real stdio) so
-            # _ws_session_is_orphaned recognizes them and the grace-reap can
-            # actually fire; a standalone `hermes --tui` keeps real _stdio.
-            session["transport"] = _detached_ws_transport
-            detached += 1
+            # The owner snapshot can race a resume/retry. Serialize the final
+            # detach with transport rebinding and only replace the transport
+            # this disconnect still owns.
+            with session["history_lock"]:
+                if session.get("transport") is not transport:
+                    continue
+                session["transport"] = _detached_ws_transport
+                detached += 1
             try:
                 _schedule_ws_orphan_reap(sid)
             except Exception:
@@ -1454,7 +1457,15 @@ def _get_compute_host_supervisor(cfg: dict | None = None):
         return _compute_host_supervisor
 
 
-def _compute_host_turn_frame(rid: str, sid: str, session: dict, text: Any) -> dict:
+def _compute_host_turn_frame(
+    rid: str,
+    sid: str,
+    session: dict,
+    text: Any,
+    *,
+    submitted_at: float | None = None,
+    message_id: str | None = None,
+) -> dict:
     with session["history_lock"]:
         history = list(session.get("history", []))
         history_version = int(session.get("history_version", 0))
@@ -1475,6 +1486,8 @@ def _compute_host_turn_frame(rid: str, sid: str, session: dict, text: Any) -> di
         "service_tier_override": session.get("create_service_tier_override"),
         "source": _session_source(session),
         "attached_images": attached_images,
+        "submitted_at": submitted_at,
+        "message_id": message_id,
     }
 
 
@@ -1545,9 +1558,24 @@ def _on_compute_host_turn_done(rid: str, sid: str, session: dict, frame: dict) -
     _drain_queued_prompt(rid, sid, session)
 
 
-def _submit_prompt_to_compute_host(rid: str, sid: str, session: dict, text: Any) -> dict:
+def _submit_prompt_to_compute_host(
+    rid: str,
+    sid: str,
+    session: dict,
+    text: Any,
+    *,
+    submitted_at: float | None = None,
+    message_id: str | None = None,
+) -> dict:
     cfg = _load_dashboard_process_isolation_config()
-    frame = _compute_host_turn_frame(rid, sid, session, text)
+    frame = _compute_host_turn_frame(
+        rid,
+        sid,
+        session,
+        text,
+        submitted_at=submitted_at,
+        message_id=message_id,
+    )
 
     def _complete(done: dict) -> None:
         # submit_turn reports a synchronous pipe failure through the callback
@@ -6662,6 +6690,11 @@ def _history_to_messages(history: list[dict]) -> list[dict]:
         # reactions — needs this instead.
         if m.get("_row_id") is not None:
             msg["row_id"] = m["_row_id"]
+        if m.get("timestamp") is not None:
+            msg["timestamp"] = m["timestamp"]
+        source_message_id = m.get("message_id") or m.get("_source_message_id")
+        if source_message_id is not None:
+            msg["message_id"] = source_message_id
         if role == "user":
             invocation = _skill_scaffold_projection(content_text)
             if invocation:
@@ -6745,7 +6778,13 @@ def _inflight_text(value: Any) -> str:
     return _content_display_text(value).strip()
 
 
-def _start_inflight_turn(session: dict, text: Any) -> None:
+def _start_inflight_turn(
+    session: dict,
+    text: Any,
+    *,
+    submitted_at: float | None = None,
+    message_id: str | None = None,
+) -> None:
     now = time.time()
     session["inflight_turn"] = {
         "assistant": "",
@@ -6754,6 +6793,10 @@ def _start_inflight_turn(session: dict, text: Any) -> None:
         "updated_at": now,
         "user": _inflight_text(text),
     }
+    if submitted_at is not None:
+        session["inflight_turn"]["submitted_at"] = submitted_at
+    if message_id is not None:
+        session["inflight_turn"]["message_id"] = message_id
 
 
 def _append_inflight_delta(session: dict, delta: Any) -> None:
@@ -6979,24 +7022,47 @@ def _maybe_schedule_auto_continue(sid: str, session: dict, session_key: str) -> 
     return {"attempt": attempt, "interrupted_at": marker["started_at"]}
 
 
-def _enqueue_prompt(session: dict, text: Any, transport: Any) -> None:
-    """Stash a message to run as the very next turn once the live one ends.
+def _has_prompt_message_id(session: dict, message_id: str) -> bool:
+    """Return whether a stable client message ID is already owned by a turn.
 
-    Used when a prompt arrives mid-turn (see ``_handle_busy_submit``). A single
-    slot is kept; a second arrival is merged (lossless, mirroring the
-    consecutive-user merge in ``repair_message_sequence``) so nothing the user
-    typed is dropped. ``transport`` is pinned so the drained turn streams back to
-    the client that sent it even if the session transport is rebound meanwhile.
+    Callers hold ``history_lock``. The in-memory checks close the window before
+    early persistence, while the SessionDB check covers timeout/resume retries
+    after the original turn has completed.
     """
-    existing = session.get("queued_prompt")
-    if (
-        existing
-        and isinstance(existing.get("text"), str)
-        and isinstance(text, str)
+    inflight = session.get("inflight_turn")
+    if isinstance(inflight, dict) and inflight.get("message_id") == message_id:
+        return True
+
+    queued_items = [session.get("queued_prompt")]
+    pending = session.get("queued_prompts")
+    if isinstance(pending, list):
+        queued_items.extend(pending)
+    if any(
+        isinstance(item, dict) and item.get("message_id") == message_id
+        for item in queued_items
     ):
-        prev = existing["text"]
-        text = f"{prev}\n\n{text}" if prev and text else (prev or text)
-    session["queued_prompt"] = {"text": text, "transport": transport}
+        return True
+
+    for item in session.get("history") or []:
+        if not isinstance(item, dict):
+            continue
+        source_id = (
+            item.get("platform_message_id")
+            or item.get("message_id")
+            or item.get("_source_message_id")
+        )
+        if source_id is not None and str(source_id) == message_id:
+            return True
+
+    agent = session.get("agent")
+    db = getattr(agent, "_session_db", None)
+    session_key = str(session.get("session_key") or "")
+    if db is not None and session_key and hasattr(db, "has_platform_message_id"):
+        try:
+            return bool(db.has_platform_message_id(session_key, message_id))
+        except Exception:
+            pass
+    return False
 
 
 def _interrupt_busy_session(sid: str, session: dict, agent: Any) -> None:
@@ -7032,10 +7098,80 @@ def _interrupt_busy_session(sid: str, session: dict, agent: Any) -> None:
                 session["_busy_interrupt_pending"] = False
 
     threading.Thread(target=interrupt, daemon=True, name=f"busy-interrupt-{sid}").start()
+def _rebind_session_transport(
+    session: dict,
+    transport: Any,
+    *,
+    message_id: str | None = None,
+    migrate_dead_queued: bool = False,
+) -> None:
+    """Bind a live client and re-home only queue entries it now owns.
+
+    Callers hold ``history_lock``. An explicit source-ID retry transfers that
+    one queued item to the retrying client. Resume/activate migrates each dead
+    queued transport independently while preserving live per-item FIFO routing.
+    """
+    session["transport"] = transport
+
+    queued_items = [session.get("queued_prompt")]
+    pending = session.get("queued_prompts")
+    if isinstance(pending, list):
+        queued_items.extend(pending)
+    for item in queued_items:
+        if not isinstance(item, dict):
+            continue
+        matches_source = (
+            message_id is not None and item.get("message_id") == message_id
+        )
+        if matches_source or (
+            migrate_dead_queued and _transport_is_dead(item.get("transport"))
+        ):
+            item["transport"] = transport
+
+    # ``inflight_turn`` has no separate transport slot: rebinding the session
+    # above transfers any matching in-flight turn atomically with its ID check.
+    # Do not manufacture one here; completed-history/DB duplicates also pass
+    # through this helper solely to keep future session events on the live client.
+
+
+def _enqueue_prompt(
+    session: dict,
+    text: Any,
+    transport: Any,
+    *,
+    submitted_at: float | None = None,
+    message_id: str | None = None,
+) -> None:
+    """Append one canonical source message to the busy-time FIFO.
+
+    ``queued_prompt`` remains the inspectable head slot for compatibility.
+    Later arrivals live in ``queued_prompts`` rather than being concatenated,
+    because text concatenation irreversibly destroys source boundaries. Each
+    item pins its own transport and optional source metadata until its turn is
+    drained.
+    """
+    queued = {"text": text, "transport": transport}
+    if submitted_at is not None:
+        queued["submitted_at"] = submitted_at
+    if message_id is not None:
+        queued["message_id"] = message_id
+
+    if session.get("queued_prompt"):
+        session.setdefault("queued_prompts", []).append(queued)
+    else:
+        session["queued_prompt"] = queued
 
 
 def _handle_busy_submit(
-    rid, sid: str, session: dict, text: Any, transport: Any, queued: bool = False
+    rid,
+    sid: str,
+    session: dict,
+    text: Any,
+    transport: Any,
+    queued: bool = False,
+    *,
+    submitted_at: float | None = None,
+    message_id: str | None = None,
 ) -> dict | None:
     """Apply the ``display.busy_input_mode`` policy to a prompt that lands while
     a turn is in flight, instead of rejecting it with ``session busy``.
@@ -7045,18 +7181,12 @@ def _handle_busy_submit(
     default policy now redirects a capable core agent in place; older agents
     retain the proven interrupt-and-queue path drained from ``run``'s tail.
 
-    Modes: ``interrupt`` (default) → redirect the live turn, falling back to
-    hard interrupt + queue for older agents; ``queue`` → queue without
-    interrupting; ``steer`` → inject after the current atomic action.
-
-    ``queued=True`` (client's queue drain, ``prompt.submit`` param) overrides
-    the mode entirely: the message was explicitly queued as "run after", so it
-    must NEVER become a live-turn correction or interrupt. Without this, a
-    drain that loses the settle race (client observed idle, server still
-    unwinding the turn) redirected the live turn with next-turn text — queue
-    semantics betrayed by a millisecond race the user can't see.
+    Modes: ``interrupt`` (default) interrupts the live turn before queueing;
+    ``queue`` waits for the next turn; ``steer`` injects into the live turn when
+    accepted and otherwise falls back to the identity-preserving queue.
+    Explicit live injection is also available through ``session.steer``.
     """
-    mode = "queue" if queued else _load_busy_input_mode()
+    mode = _load_busy_input_mode()
     agent = session.get("agent")
     with session["history_lock"]:
         if not session.get("running"):
@@ -7098,7 +7228,13 @@ def _handle_busy_submit(
     with session["history_lock"]:
         if not session.get("running"):
             return None
-        _enqueue_prompt(session, text, transport)
+        _enqueue_prompt(
+            session,
+            text,
+            transport,
+            submitted_at=submitted_at,
+            message_id=message_id,
+        )
         session["last_active"] = time.time()
 
     if mode != "queue":
@@ -7106,24 +7242,44 @@ def _handle_busy_submit(
     return _ok(rid, {"status": "queued"})
 
 
-def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
-    """Fire a queued next-turn prompt if one is waiting and the session is idle.
 
-    Returns True if a queued prompt was dispatched (the caller should then skip
-    lower-priority follow-ups this cycle — the user's message wins). Mirrors the
-    claim-under-lock pattern used by the goal-continuation re-fire.
+
+def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
+    """Dispatch the FIFO head once when the session becomes idle.
+
+    Returns True after claiming an item, so the caller skips lower-priority
+    follow-ups for this cycle. The head is advanced under ``history_lock``;
+    synchronous dispatch failure restores the claimed item ahead of arrivals
+    that raced the failed attempt.
     """
     with session["history_lock"]:
         queued = session.get("queued_prompt")
         if not queued or session.get("running"):
             return False
-        session["queued_prompt"] = None
+        pending = session.get("queued_prompts")
+        if isinstance(pending, list) and pending:
+            session["queued_prompt"] = pending.pop(0)
+        else:
+            session["queued_prompt"] = None
         session["running"] = True
         if queued.get("transport") is not None:
             session["transport"] = queued["transport"]
+        _start_inflight_turn(
+            session,
+            queued["text"],
+            submitted_at=queued.get("submitted_at"),
+            message_id=queued.get("message_id"),
+        )
+    run_kwargs = {
+        key: queued[key]
+        for key in ("submitted_at", "message_id")
+        if queued.get(key) is not None
+    }
     try:
         if _session_uses_compute_host(session):
-            resp = _submit_prompt_to_compute_host(rid, sid, session, queued["text"])
+            resp = _submit_prompt_to_compute_host(
+                rid, sid, session, queued["text"], **run_kwargs
+            )
             if resp.get("error"):
                 message = str(((resp.get("error") or {}).get("message")) or "queued prompt failed")
                 with session["history_lock"]:
@@ -7131,7 +7287,7 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
                     _clear_inflight_turn(session)
                 _emit("error", sid, {"message": message})
         else:
-            _run_prompt_submit(rid, sid, session, queued["text"])
+            _run_prompt_submit(rid, sid, session, queued["text"], **run_kwargs)
     except Exception as exc:
         print(
             f"[tui_gateway] queued prompt dispatch failed: "
@@ -7139,8 +7295,15 @@ def _drain_queued_prompt(rid, sid: str, session: dict) -> bool:
             file=sys.stderr,
         )
         with session["history_lock"]:
+            _clear_inflight_turn(session)
+            next_queued = session.get("queued_prompt")
+            if next_queued:
+                session.setdefault("queued_prompts", []).insert(0, next_queued)
+            session["queued_prompt"] = queued
             session["running"] = False
     return True
+
+
 
 
 def _inflight_snapshot(session: dict) -> dict | None:
@@ -7525,7 +7688,11 @@ def _live_session_payload(
         if cols is not None:
             session["cols"] = cols
         if transport is not None:
-            session["transport"] = transport
+            _rebind_session_transport(
+                session,
+                transport,
+                migrate_dead_queued=True,
+            )
         if touch:
             session["last_active"] = time.time()
         in_memory_history = list(session.get("display_history_prefix") or []) + list(
@@ -8169,6 +8336,7 @@ def _serialize_subscription_preview(p) -> dict:
     }
 
 
+
 # ── Delegation: subagent tree observability + controls ───────────────
 # Powers the TUI's /agents overlay (see ui-tui/src/components/agentsOverlay).
 # The registry lives in tools/delegate_tool — these handlers are thin
@@ -8238,6 +8406,10 @@ def _read_spawn_tree_index(session_dir) -> list[dict]:
 
 
 # ── Methods: prompt ──────────────────────────────────────────────────
+
+
+
+
 
 
 def _notification_event_belongs_elsewhere(sid: str, session: dict, evt: dict) -> bool:
@@ -8913,7 +9085,14 @@ def _start_notification_poller(sid: str, session: dict) -> threading.Event:
 
 
 def _run_prompt_submit(
-    rid, sid: str, session: dict, text: Any, *, display_kind: str | None = None,
+    rid,
+    sid: str,
+    session: dict,
+    text: Any,
+    *,
+    submitted_at: float | None = None,
+    message_id: str | None = None,
+    display_kind: str | None = None,
     display_metadata: dict | None = None,
 ) -> None:
     with session["history_lock"]:
@@ -8925,7 +9104,12 @@ def _run_prompt_submit(
         # A retained failed turn (see _fail_inflight_turn) is a stale leftover
         # by the time a new turn starts — replace it, never append onto it.
         if not isinstance(inflight, dict) or inflight.get("status") == "error":
-            _start_inflight_turn(session, text)
+            _start_inflight_turn(
+                session,
+                text,
+                submitted_at=submitted_at,
+                message_id=message_id,
+            )
     agent = session["agent"]
     if hasattr(agent, "clear_interrupt"):
         try:
@@ -9191,11 +9375,26 @@ def _run_prompt_submit(
             # the same value is a no-op.
             try:
                 _run_params = inspect.signature(agent.run_conversation).parameters
+                _accepts_kwargs = any(
+                    parameter.kind == inspect.Parameter.VAR_KEYWORD
+                    for parameter in _run_params.values()
+                )
             except (TypeError, ValueError):
                 _run_params = {}
-            if "task_id" in _run_params:
+                _accepts_kwargs = False
+            if "task_id" in _run_params or _accepts_kwargs:
                 run_kwargs["task_id"] = session["session_key"]
-            if display_kind and "persist_user_display_kind" in _run_params:
+            if submitted_at is not None and (
+                "persist_user_timestamp" in _run_params or _accepts_kwargs
+            ):
+                run_kwargs["persist_user_timestamp"] = submitted_at
+            if message_id is not None and (
+                "persist_user_message_id" in _run_params or _accepts_kwargs
+            ):
+                run_kwargs["persist_user_message_id"] = message_id
+            if display_kind and (
+                "persist_user_display_kind" in _run_params or _accepts_kwargs
+            ):
                 run_kwargs["persist_user_display_kind"] = display_kind
                 run_kwargs["persist_user_display_metadata"] = display_metadata
             result = agent.run_conversation(run_message, **run_kwargs)
