@@ -81,17 +81,27 @@ uv run hermes chat --query 'Reply exactly ok' --provider custom --model qwen3.6:
 
 To ship the updated CLI into another environment, build and install a fresh
 wheel from this checkout. On platforms for which Relay publishes a native
-wheel, Hermes installs its supported NeMo Relay runtime as a normal dependency:
+wheel, add the `nemo-relay` extra to pull in the supported runtime:
 
 ```bash
-uv build --wheel
-python -m pip install --force-reinstall dist/hermes_agent-*.whl
+BUILD_DIR=$(mktemp -d)
+uv build --wheel --out-dir "$BUILD_DIR"
+WHEEL=$(echo "$BUILD_DIR"/hermes_agent-*.whl)
+python -m pip install --force-reinstall "${WHEEL}[nemo-relay]"
 hermes plugins enable observability/nemo_relay
 ```
 
-The plugin remains opt-in even though the runtime dependency is installed by
-default. Enabling this plugin controls rich observability and adaptive
-behavior; it does not control Hermes shared client metrics.
+Requesting the extra against the built artifact keeps Hermes itself resolving
+from this checkout. `pip install 'hermes-agent[nemo-relay]'` would instead pull
+Hermes from PyPI and overwrite the wheel you just built.
+
+Building into a fresh directory keeps the glob unambiguous. Globbing a shared
+`dist/` can match several wheels from earlier builds, and `${WHEEL}` would then
+expand to multiple paths and install the wrong artifact — or nothing.
+
+The plugin remains opt-in in addition to the runtime dependency. Enabling this
+plugin controls rich observability and adaptive behavior; it does not control
+Hermes shared client metrics.
 
 ## Export Configuration
 
