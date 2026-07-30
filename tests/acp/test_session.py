@@ -291,6 +291,124 @@ class TestPersistence:
         }]
 
 
+    def test_named_custom_session_restores_after_process_restart(
+        self, tmp_path, monkeypatch
+    ):
+        """session/load must recover a named provider's current credentials."""
+        from hermes_cli import runtime_provider as runtime_provider
+
+        config = {
+            "model": {"provider": "ollama-remote", "default": "ornith:35b"},
+            "custom_providers": [
+                {
+                    "name": "ollama-remote",
+                    "base_url": "http://ollama-remote:11434/v1",
+                    "key_env": "OLLAMA_REMOTE_KEY",
+                    "api_mode": "chat_completions",
+                }
+            ],
+        }
+        monkeypatch.setenv("OLLAMA_REMOTE_KEY", "current-config-key")
+        monkeypatch.setattr("hermes_cli.config.load_config", lambda: config)
+        monkeypatch.setattr(runtime_provider, "load_config", lambda: config)
+        monkeypatch.setattr(
+            runtime_provider, "_try_resolve_from_custom_pool", lambda *args, **kwargs: None
+        )
+
+        def fake_agent(**kwargs):
+            return SimpleNamespace(
+                model=kwargs.get("model"),
+                provider=kwargs.get("provider"),
+                requested_provider=kwargs.get("requested_provider"),
+                base_url=kwargs.get("base_url"),
+                api_key=kwargs.get("api_key"),
+                api_mode=kwargs.get("api_mode"),
+                _print_fn=None,
+            )
+
+        db = SessionDB(tmp_path / "state.db")
+        db.create_session(
+            session_id="named-custom-acp",
+            source="acp",
+            model="ornith:35b",
+            model_config={"cwd": "/work"},
+        )
+        db.update_session_billing_route(
+            "named-custom-acp",
+            provider="custom",
+            base_url="http://ollama-remote:11434/v1",
+        )
+
+        with patch("run_agent.AIAgent", side_effect=fake_agent):
+            restored = SessionManager(db=db).get_session("named-custom-acp")
+
+        assert restored is not None
+        assert restored.agent.provider == "custom"
+        assert restored.agent.requested_provider == "custom:ollama-remote"
+        assert restored.agent.base_url == "http://ollama-remote:11434/v1"
+        assert restored.agent.api_mode == "chat_completions"
+        assert restored.agent.api_key == "current-config-key"
+        persisted = db.get_session("named-custom-acp")
+        assert persisted is not None
+        persisted_config = json.loads(persisted["model_config"])
+        assert persisted_config == {"cwd": "/work"}
+        assert "api_key" not in persisted_config
+        assert "key_env" not in persisted_config
+
+    def test_restore_preserves_concrete_persisted_provider(
+        self, tmp_path, monkeypatch
+    ):
+        """A concrete stored provider must not be replaced by config fallback."""
+        calls = []
+
+        def fake_resolve(requested=None, **kwargs):
+            calls.append({"requested": requested, **kwargs})
+            return {
+                "provider": requested,
+                "requested_provider": requested,
+                "api_mode": "anthropic_messages",
+                "base_url": "https://api.anthropic.com",
+                "api_key": "anthropic-key",
+                "command": None,
+                "args": [],
+            }
+
+        monkeypatch.setattr(
+            "hermes_cli.config.load_config",
+            lambda: {"model": {"provider": "ollama-remote", "default": "claude"}},
+        )
+        monkeypatch.setattr(
+            "hermes_cli.runtime_provider.resolve_runtime_provider", fake_resolve
+        )
+        db = SessionDB(tmp_path / "state.db")
+        db.create_session(
+            session_id="concrete-acp",
+            source="acp",
+            model="claude",
+            model_config={"cwd": "/work"},
+        )
+        db.update_session_billing_route(
+            "concrete-acp",
+            provider="anthropic",
+            base_url="https://api.anthropic.com",
+        )
+
+        with patch(
+            "run_agent.AIAgent",
+            side_effect=lambda **kwargs: SimpleNamespace(**kwargs),
+        ):
+            restored = SessionManager(db=db).get_session("concrete-acp")
+
+        assert restored is not None
+        assert calls == [
+            {
+                "requested": "anthropic",
+                "explicit_base_url": "https://api.anthropic.com",
+                "target_model": "claude",
+            }
+        ]
+        assert restored.agent.provider == "anthropic"
+
     def test_acp_agents_route_human_output_to_stderr(self, tmp_path, monkeypatch):
         """ACP agents must keep stdout clean for JSON-RPC stdio transport."""
 

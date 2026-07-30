@@ -100,6 +100,7 @@ def test_acp_real_agent_gets_session_db_for_recall(monkeypatch):
         "hermes_cli.runtime_provider",
         mod(
             "hermes_cli.runtime_provider",
+            canonical_custom_identity=lambda **_kwargs: None,
             resolve_runtime_provider=lambda **_kwargs: {
                 "provider": "p",
                 "api_mode": "chat_completions",
