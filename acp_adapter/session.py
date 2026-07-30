@@ -602,7 +602,10 @@ class SessionManager:
 
         from run_agent import AIAgent
         from hermes_cli.config import load_config
-        from hermes_cli.runtime_provider import resolve_runtime_provider
+        from hermes_cli.runtime_provider import (
+            canonical_custom_identity,
+            resolve_runtime_provider,
+        )
 
         config = load_config()
         model_cfg = config.get("model")
@@ -633,10 +636,22 @@ class SessionManager:
         }
 
         try:
-            runtime = resolve_runtime_provider(requested=requested_provider or config_provider)
+            provider_to_resolve = requested_provider or config_provider
+            if str(provider_to_resolve or "").strip().lower() == "custom":
+                provider_to_resolve = canonical_custom_identity(
+                    base_url=base_url,
+                    config_provider=config_provider,
+                    model=model,
+                ) or provider_to_resolve
+            runtime = resolve_runtime_provider(
+                requested=provider_to_resolve,
+                explicit_base_url=base_url,
+                target_model=model,
+            )
             kwargs.update(
                 {
                     "provider": runtime.get("provider"),
+                    "requested_provider": runtime.get("requested_provider"),
                     "api_mode": api_mode or runtime.get("api_mode"),
                     "base_url": base_url or runtime.get("base_url"),
                     "api_key": runtime.get("api_key"),
