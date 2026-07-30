@@ -9069,6 +9069,10 @@ function showQuickEntryWindow() {
       if (!quickEntryWindow?.isDestroyed()) {
         quickEntryWindow.show()
         quickEntryWindow.focus()
+        // First spawn: the renderer's onShown callback refocuses the input.
+        // Without this IPC the mount-time focus() runs before the window is
+        // visible and silently fails, so the input never gets focus.
+        quickEntryWindow.webContents.send('hermes:quick-entry:shown')
       }
     })
 
