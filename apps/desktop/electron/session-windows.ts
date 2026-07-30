@@ -11,16 +11,14 @@ const SESSION_WINDOW_MIN_WIDTH = 420
 const SESSION_WINDOW_MIN_HEIGHT = 620
 
 // Shared webPreferences for every window that renders the chat transcript — the
-// primary window AND the secondary session windows. Keeping it in one place is
-// the whole point: the two BrowserWindow definitions in main.ts used to be
-// hand-copied, and the secondary windows silently lost `backgroundThrottling:
-// false`, so a streamed answer stalled until the window regained focus.
+// primary window AND the secondary session windows. Keeping it in one place
+// prevents their security, autoplay, and background behavior from drifting.
 //
-// `backgroundThrottling: false` is load-bearing: the transcript streams to the
-// screen through a bounded timer flush, which Chromium clamps for blurred/
-// occluded windows. A streaming chat app must keep painting in the
-// background, so every chat window opts out. The preload path is injected
-// because it depends on the Electron entry's __dirname.
+// Background throttling remains enabled. Gateway events continue to arrive in
+// an occluded window, while Chromium may reduce its timer and paint cadence.
+// The stream hook flushes queued deltas immediately when the document becomes
+// visible again, so hidden chat windows do not consume foreground rendering
+// resources merely to paint text nobody can see.
 //
 // `autoplayPolicy: 'no-user-gesture-required'` is load-bearing for voice:
 // Chromium's default autoplay policy suspends audio (HTMLAudioElement.play()
@@ -39,7 +37,7 @@ function chatWindowWebPreferences(preloadPath: string) {
     sandbox: true,
     nodeIntegration: false,
     devTools: true,
-    backgroundThrottling: false,
+    backgroundThrottling: true,
     autoplayPolicy: 'no-user-gesture-required' as const
   }
 }

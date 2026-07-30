@@ -191,13 +191,12 @@ test('registry trims the session id before keying', () => {
   assert.equal(registry.has('s1'), true)
 })
 
-test('chatWindowWebPreferences disables background throttling so streaming paints while blurred', () => {
-  // Regression: secondary session windows used to omit this flag, so a streamed
-  // answer stalled until the window regained focus (Chromium clamps the
-  // transcript flush timer for backgrounded windows).
+test('chatWindowWebPreferences allows Chromium to throttle hidden chat windows', () => {
+  // Hidden windows still receive gateway events, but do not need to paint each
+  // streamed delta at foreground speed.
   const prefs = chatWindowWebPreferences('/tmp/preload.cjs')
 
-  assert.equal(prefs.backgroundThrottling, false)
+  assert.equal(prefs.backgroundThrottling, true)
 })
 
 test('chatWindowWebPreferences passes the preload path through and keeps the hardened defaults', () => {

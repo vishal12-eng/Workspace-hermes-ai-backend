@@ -271,20 +271,10 @@ export function useMessageStream({
       lastFlushCostRef.current = performance.now() - startedAt
     }
 
-    // Always a timer, never requestAnimationFrame. Chromium pauses rAF for a
-    // renderer it considers hidden, and "hidden" is not something this code can
-    // verify: `backgroundThrottling: false` plus the process-level switches in
-    // electron/main.ts cover the blurred and occluded cases, but they don't
-    // cover a minimized window, a fully off-screen one, or a renderer the
-    // compositor has otherwise parked. In those states an rAF-gated flush never
-    // runs, so a finished answer sits in this queue until some later input or
-    // focus event happens to wake a frame — the reply looks stalled, then
-    // arrives all at once on refocus.
-    //
-    // A timer keeps the same coalescing cadence (that's what the floor above is
-    // for) while guaranteeing delivery without user interaction. Timers are
-    // clamped in background renderers rather than suspended, and
-    // disable-background-timer-throttling already opts out of that clamp.
+    // Always a timer, never requestAnimationFrame. Chromium pauses rAF for
+    // hidden renderers. Timers may be clamped while hidden, which is desirable:
+    // state keeps progressing without painting unseen text at foreground speed.
+    // The visibility handler below flushes any remaining deltas on return.
     flushHandleRef.current = window.setTimeout(runFlush, Math.max(0, adaptiveFloor - sinceLast))
   }, [flushQueuedDeltas])
 
@@ -313,6 +303,27 @@ export function useMessageStream({
     },
     [flushQueuedDeltas]
   )
+
+  // This ref tracks the pending timer handle; it does not mirror reactive state.
+  // eslint-disable-next-line no-restricted-syntax
+  useEffect(() => {
+    const flushWhenVisible = () => {
+      if (document.visibilityState !== 'visible') {
+        return
+      }
+
+      if (flushHandleRef.current !== null) {
+        window.clearTimeout(flushHandleRef.current)
+        flushHandleRef.current = null
+      }
+
+      flushQueuedDeltas()
+    }
+
+    document.addEventListener('visibilitychange', flushWhenVisible)
+
+    return () => document.removeEventListener('visibilitychange', flushWhenVisible)
+  }, [flushQueuedDeltas])
 
   const appendAssistantDelta = useCallback(
     (sessionId: string, delta: string) => {
