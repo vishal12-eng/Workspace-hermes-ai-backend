@@ -163,6 +163,7 @@ interface GatewayEventDeps {
   lastCwdInfoSessionRef: MutableRefObject<string | null>
   nativeSubagentSessionsRef: MutableRefObject<Set<string>>
   appendAssistantDelta: (sessionId: string, delta: string) => void
+  appendReasoningAvailable: (sessionId: string, text: string) => void
   appendReasoningDelta: (sessionId: string, delta: string, replace?: boolean) => void
   completeAssistantMessage: (
     sessionId: string,
@@ -194,6 +195,7 @@ interface GatewayEventDeps {
 export function useGatewayEventHandler(deps: GatewayEventDeps) {
   const {
     appendAssistantDelta,
+    appendReasoningAvailable,
     appendReasoningDelta,
     activeGatewayProfile,
     activeSessionIdRef,
@@ -586,7 +588,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
         }
       } else if (event.type === 'reasoning.available') {
         if (sessionId) {
-          appendReasoningDelta(sessionId, coerceThinkingText(payload?.text), true)
+          appendReasoningAvailable(sessionId, coerceThinkingText(payload?.text))
         }
 
         if (isActiveEvent) {
@@ -1168,6 +1170,7 @@ export function useGatewayEventHandler(deps: GatewayEventDeps) {
     },
     [
       appendAssistantDelta,
+      appendReasoningAvailable,
       appendReasoningDelta,
       activeSessionIdRef,
       activeGatewayProfile,
