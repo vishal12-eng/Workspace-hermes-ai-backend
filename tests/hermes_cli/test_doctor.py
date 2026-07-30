@@ -272,6 +272,16 @@ class TestDoctorMemoryProviderSection:
         assert "Mem0" not in out
 
 
+    def test_holographic_provider_warns_when_numpy_missing(self, monkeypatch, tmp_path):
+        from plugins.memory.holographic import holographic as hrr
+
+        monkeypatch.setattr(hrr, "_HAS_NUMPY", False)
+        out = self._run_doctor_and_capture(monkeypatch, tmp_path, provider="holographic")
+
+        assert "holographic provider active" in out
+        assert "Holographic memory degraded" in out
+        assert "numpy not installed" in out
+
 
 
 def _run_doctor_with_managed_agent_browser(monkeypatch, tmp_path, runnable):
