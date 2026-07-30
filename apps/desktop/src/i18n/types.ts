@@ -2088,6 +2088,13 @@ export interface Translations {
       }
       titles: Record<ToolTitleKey, ToolTitleCopy>
     }
+    avatarEditor: {
+      title: string
+      description: string
+      youLabel: string
+      hermesLabel: string
+      placeholder: string
+    }
   }
 
   prompts: {
