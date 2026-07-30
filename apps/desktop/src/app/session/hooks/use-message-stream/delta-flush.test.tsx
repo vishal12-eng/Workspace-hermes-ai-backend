@@ -90,6 +90,25 @@ describe('useMessageStream delta flush scheduling', () => {
     expect(assistantText()).toBe('still streaming')
   })
 
+  it('flushes queued text immediately when a hidden window becomes visible', () => {
+    vi.mocked(performance.now).mockReturnValue(0)
+    mountStream()
+
+    act(() => appendAssistantDelta!(SID, 'caught up on focus'))
+    expect(assistantText()).toBe('')
+    expect(vi.getTimerCount()).toBe(1)
+
+    Object.defineProperty(globalThis.document, 'visibilityState', {
+      configurable: true,
+      value: 'visible'
+    })
+
+    act(() => globalThis.document.dispatchEvent(new Event('visibilitychange')))
+
+    expect(assistantText()).toBe('caught up on focus')
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
   it('cancels the pending timer on unmount and flushes exactly once', async () => {
     vi.mocked(performance.now).mockReturnValue(0)
     mountStream()

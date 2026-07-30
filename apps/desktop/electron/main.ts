@@ -421,19 +421,6 @@ if (IS_WINDOWS) {
 
 ipcMain.handle('hermes:get-remote-display-reason', () => REMOTE_DISPLAY_REASON)
 
-// Keep the renderer running at full speed while the window is in the background
-// or occluded. The chat transcript streams to screen through a bounded timer
-// flush; Chromium clamps timers for backgrounded/occluded renderers, so without
-// these the live answer stalls
-// whenever the window loses focus (switching to your editor mid-turn, detached
-// devtools, another window covering it) and only paints on refocus or refresh.
-// `backgroundThrottling: false` on the BrowserWindow covers the blurred case;
-// these process-level switches additionally stop Chromium from backgrounding or
-// occlusion-throttling the renderer. Must run before app `ready`.
-app.commandLine.appendSwitch('disable-renderer-backgrounding')
-app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
-app.commandLine.appendSwitch('disable-background-timer-throttling')
-
 const SOURCE_REPO_ROOT = path.resolve(APP_ROOT, '../..')
 
 // Build-time install stamp -- the git ref this .exe was built against.
@@ -8735,8 +8722,8 @@ function nextInstanceBounds() {
 }
 
 // Open a new full-chrome instance window. Mirrors createWindow()'s window
-// options (shared chatWindowWebPreferences keeps backgroundThrottling:false so a
-// streamed answer never stalls in the background) but is a peer, not the
+// options (including the shared security, autoplay, and background-throttling
+// policy) but is a peer, not the
 // primary: it never overwrites the mainWindow global, doesn't start the backend
 // (the renderer's getConnection() joins the already-running one), and loads the
 // plain renderer URL so the full app renders.
@@ -9158,10 +9145,8 @@ function createWindow() {
     // material before the renderer paints the app theme. See createSessionWindow.
     show: false,
     backgroundColor: getWindowBackgroundColor(),
-    // Shared with the secondary session windows (chatWindowWebPreferences) so
-    // both keep `backgroundThrottling: false` — the chat transcript uses a
-    // bounded timer flush that Chromium clamps for blurred windows, stalling
-    // the live answer until refocus. See session-windows.ts.
+    // Shared with the secondary session windows so their security, autoplay,
+    // and background-throttling behavior cannot drift. See session-windows.ts.
     webPreferences: chatWindowWebPreferences(PRELOAD_PATH)
   })
 
