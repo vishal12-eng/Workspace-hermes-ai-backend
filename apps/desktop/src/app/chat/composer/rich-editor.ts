@@ -176,8 +176,24 @@ function composerSelectionRange(editor: HTMLElement) {
 /** Insert text at the caret (replacing any selection), with any `@kind:value`
  *  directives in it landing as chips. Pastes use this instead of
  *  `execCommand('insertText')` — Chromium's editing pipeline is ~O(n²) on large
- *  multiline blobs. */
-export function insertComposerContentsAtCaret(editor: HTMLElement, text: string) {
+ *  multiline blobs.
+ *
+ *  `consumeBefore` characters immediately before the caret are swallowed by the
+ *  insert. That's how a paste into an open `@url:` scope replaces the scope
+ *  instead of stacking on it (`@url:@url:\`https://…\``). */
+export function insertComposerContentsAtCaret(editor: HTMLElement, text: string, consumeBefore = 0) {
+  const scoped = consumeBefore > 0 ? rangeBeforeCaret(editor, consumeBefore) : null
+
+  if (scoped) {
+    scoped.deleteContents()
+    scoped.collapse(true)
+
+    const selection = window.getSelection()
+
+    selection?.removeAllRanges()
+    selection?.addRange(scoped)
+  }
+
   const hit = composerSelectionRange(editor)
   const fragment = document.createDocumentFragment()
 
